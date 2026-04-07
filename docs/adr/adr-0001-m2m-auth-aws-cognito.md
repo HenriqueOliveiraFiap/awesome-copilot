@@ -10,13 +10,13 @@ revisores:
   - 'DevOps'
   - 'Segurança'
 tags:
-  - 'autenticacao'
-  - 'autorizacao'
+  - 'autenticação'
+  - 'autorização'
   - 'm2m'
   - 'aws-cognito'
   - 'oauth2'
   - 'microsservicos'
-  - 'seguranca'
+  - 'segurança'
 supersedes: 'ADR-v2: M2M - Autenticação e Autorização entre Serviços Internos'
 superseded_by: ''
 ---
