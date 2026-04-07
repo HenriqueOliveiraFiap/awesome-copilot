@@ -30,7 +30,7 @@ superseded_by: ''
 
 Our microservices architecture has grown from a small set of internally communicating services (v2) to a distributed multi-team, multi-service ecosystem where backend services communicate with one another without human user involvement. The v2 approach relied on static API keys and a basic OAuth 2.0 client credentials flow without a managed identity provider, which introduced the following pain points:
 
-- **No centralised identity lifecycle management**: API keys were provisioned and rotated manually, creating operational and security gaps.
+- **No centralized identity lifecycle management**: API keys were provisioned and rotated manually, creating operational and security gaps.
 - **No fine-grained scoping**: Every service had access to every API; least-privilege was not enforced.
 - **No auditability**: Token issuance and usage were not observable through standardised tooling.
 - **Scaling and compliance pressures**: SOC 2 and ISO 27001 audit requirements mandate demonstrable access control, secret rotation, and audit logging for service-to-service communication.
@@ -126,7 +126,7 @@ AWS Cognito is selected due to:
 
 - **POS-3 — Automated Secret Rotation**: AWS Secrets Manager + Lambda rotation removes manual secret management, reducing the risk of stale or leaked credentials.
 
-- **POS-4 — Auditability and Observability**: CloudWatch integration provides a centralised view of token issuance, failures, and scope usage, satisfying audit requirements (SOC 2, ISO 27001).
+- **POS-4 — Auditability and Observability**: CloudWatch integration provides a centralized view of token issuance, failures, and scope usage, satisfying audit requirements (SOC 2, ISO 27001).
 
 - **POS-5 — Native AWS Integration**: Cognito integrates natively with API Gateway, CloudWatch, Secrets Manager, and IAM, reducing the operational surface area for a team already invested in AWS.
 
@@ -144,7 +144,7 @@ AWS Cognito is selected due to:
 
 - **NEG-5 — Limited Scope Flexibility Compared to Purpose-Built M2M Providers**: Cognito's resource server / scope model is less flexible than providers like Auth0 or Okta. Dynamic scope policies, fine-grained RBAC, and per-request claim enrichment are not natively supported without custom Lambda authorizers or post-token-generation triggers.
 
-- **NEG-6 — Debugging Complexity**: Diagnosing M2M authentication failures in a distributed system requires correlating Cognito logs, API Gateway access logs, and application-level JWT validation errors across CloudWatch Log Groups. This is more complex than a centralised identity management dashboard.
+- **NEG-6 — Debugging Complexity**: Diagnosing M2M authentication failures in a distributed system requires correlating Cognito logs, API Gateway access logs, and application-level JWT validation errors across CloudWatch Log Groups. This is more complex than a centralized identity management dashboard.
 
 - **NEG-7 — Cost at Scale**: Cognito charges for MAUs (Monthly Active Users), but for M2M App Clients, the cost model is based on token operations. At high token issuance volumes, costs must be modelled explicitly. Token caching directly reduces cost as well as latency.
 
