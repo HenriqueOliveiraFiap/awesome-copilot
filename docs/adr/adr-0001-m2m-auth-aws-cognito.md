@@ -135,13 +135,15 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em outr
 
   **Estimativa de custo para a Aarin (~300 serviços, 2 pods cada, cache de 1h):**
 
-  | Cenário | Tokens/mês | Tier | Custo estimado/mês |
-  |---------|-----------|------|-------------------|
-  | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | Tier 1 | **~$0,49** |
-  | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | Tier 1 | **~$0,97** |
-  | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | Tier 1 | **~$0,99** |
+  Fórmula: `(tokens ÷ 1.000) × preço_do_tier`
 
-  > 💡 **Conclusão:** O volume estimado (~216k–438k tokens/mês) se mantém inteiramente dentro do **Tier 1**, com custo inferior a **$1,00/mês**. Para atingir o Tier 2 seriam necessários mais de 250.000 tokens/mês de forma consistente, o que exigiria ~174 serviços sem nenhum cache — cenário impossível com a estratégia de cache de 1h. O custo é **praticamente negligível** para a escala da Aarin; o principal valor do cache de 1 hora é a proteção contra os limites de taxa do Cognito (10 ops/s por User Pool).
+  | Cenário | Tokens/mês | Cálculo por tier | Custo estimado/mês |
+  |---------|-----------|-----------------|-------------------|
+  | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | 216 × $2,25 (Tier 1) | **~$486** |
+  | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | 250 × $2,25 + 182 × $1,50 (Tier 1+2) | **~$835** |
+  | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | 250 × $2,25 + 188 × $1,50 (Tier 1+2) | **~$845** |
+
+  > 💡 **Conclusão:** O cenário Otimista (com cache distribuído e mutex, evitando requisições duplicadas entre pods) mantém o volume abaixo de 250.000/mês e fica inteiramente no **Tier 1 (~$486/mês)**. Os cenários Realista e Conservador ultrapassam esse limite e entram no Tier 2, custando **~$835–$845/mês**. O principal mecanismo de controle de custo é o cache de 1 hora nas bibliotecas internas — que também protege contra os limites de taxa do Cognito (10 ops/s por User Pool). Considerar cache distribuído com mutex reduz o custo em ~42%.
 
 - Credenciais armazenadas no **AWS Secrets Manager** com path padronizado: `/m2m/{ambiente}/{nome-do-servico}/client-secret`
 
