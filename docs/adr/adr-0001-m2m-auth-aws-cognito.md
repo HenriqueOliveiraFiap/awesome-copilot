@@ -125,17 +125,23 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em outr
 ### **App Clients (1 por serviço consumidor)**
 
 - Cada serviço que **consome APIs** possui credenciais próprias (Client ID + Client Secret)
-- 💰 **Importante:** Recentemente a AWS atualizou o modelo de precificação de M2M no Cognito, removendo o custo fixo de $6 por App Client. Agora o custo ocorre apenas na geração do token (**$0,00225 por 1.000 tokens** — fonte: [AWS Cognito Pricing](https://aws.amazon.com/cognito/pricing/)).
+- 💰 **Importante:** Recentemente a AWS atualizou o modelo de precificação de M2M no Cognito, removendo o custo fixo de $6 por App Client. Agora o custo ocorre apenas na geração do token, com precificação escalonada ([AWS Cognito Pricing](https://aws.amazon.com/cognito/pricing/)):
+
+  | Tier | Faixa (tokens/mês) | Preço por 1.000 tokens |
+  |------|--------------------|------------------------|
+  | 1 | 1 – 250.000 | **USD 2,25** |
+  | 2 | 250.001 – 5.000.000 | USD 1,50 |
+  | 3 | 5.000.001+ | USD 1,125 |
 
   **Estimativa de custo para a Aarin (~300 serviços, 2 pods cada, cache de 1h):**
 
-  | Cenário | Tokens/mês | Custo estimado/mês |
-  |---------|-----------|-------------------|
-  | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | **~$0,49** |
-  | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | **~$0,97** |
-  | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | **~$1,00** |
+  | Cenário | Tokens/mês | Tier | Custo estimado/mês |
+  |---------|-----------|------|-------------------|
+  | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | Tier 1 | **~$0,49** |
+  | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | Tier 1 | **~$0,97** |
+  | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | Tier 1 | **~$0,99** |
 
-  > 💡 **Conclusão:** O custo de geração de tokens é **praticamente negligível** para a escala da Aarin — menos de $1/mês mesmo no cenário realista. O principal mecanismo de controle de custo continua sendo o cache de 1 hora nas bibliotecas internas (que também protege contra os limites de taxa do Cognito).
+  > 💡 **Conclusão:** O volume estimado (~216k–438k tokens/mês) se mantém inteiramente dentro do **Tier 1**, com custo inferior a **$1,00/mês**. Para atingir o Tier 2 seriam necessários mais de 250.000 tokens/mês de forma consistente, o que exigiria ~174 serviços sem nenhum cache — cenário impossível com a estratégia de cache de 1h. O custo é **praticamente negligível** para a escala da Aarin; o principal valor do cache de 1 hora é a proteção contra os limites de taxa do Cognito (10 ops/s por User Pool).
 
 - Credenciais armazenadas no **AWS Secrets Manager** com path padronizado: `/m2m/{ambiente}/{nome-do-servico}/client-secret`
 
