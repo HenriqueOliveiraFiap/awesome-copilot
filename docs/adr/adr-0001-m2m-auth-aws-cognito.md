@@ -233,28 +233,33 @@ Token TTL = 3600s (1 hora — padrão do Cognito)
 **Regras das bibliotecas:**
 
 1. **Renovar 60 segundos antes da expiração** — garante que o token esteja sempre fresco quando injetado em uma requisição HTTP, sem buracos de autenticação entre threads concorrentes
-2. **Mutex/lock por instância** — evitar que múltiplas threads do mesmo pod disparem chamadas simultâneas ao Cognito para o mesmo `client_id` (thundering herd local)
+2. **Mutex por instância** — evitar que múltiplas threads do mesmo pod disparem chamadas simultâneas ao Cognito para o mesmo `client_id` (thundering herd local)
 3. **Fallback tolerante** — se a renovação proativa falhar (Cognito indisponível), a biblioteca deve ainda tentar usar o token em cache enquanto ele não tiver expirado, e só lançar exceção quando não houver token válido algum
 4. **Cache sensível ao `exp`** — o TTL de cache deve ser calculado dinamicamente a partir do claim `exp` do JWT retornado, não de um valor fixo hardcoded. Isso garante compatibilidade se o Cognito retornar um TTL diferente de 3600s no futuro
 
-**Pseudocódigo do ciclo de vida (agnóstico de linguagem):**
+#### O que é um Mutex e por que ele é necessário aqui?
 
-```
-function getValidToken(clientId):
-  cachedToken = cache.get(clientId)
+**Mutex** (do inglês *Mutual Exclusion*) é um mecanismo de sincronização que garante que apenas **uma thread por vez** execute um bloco de código crítico. Todas as outras threads que tentam entrar naquele bloco ficam em fila e aguardam a thread atual terminar antes de prosseguir.
 
-  if cachedToken is null or isExpiredOrExpiresSoon(cachedToken, thresholdSeconds=60):
-    lock.acquire(clientId):          // mutex por client_id
-      cachedToken = cache.get(clientId)  // double-check após lock
-      if cachedToken is null or isExpiredOrExpiresSoon(cachedToken, thresholdSeconds=60):
-        newToken = cognito.issueToken(clientId, clientSecret)
-        ttl = newToken.exp - now() - 10   // guardar com 10s de margem extra
-        cache.set(clientId, newToken, ttl)
-        cachedToken = newToken
-    lock.release(clientId)
+**Por que precisamos de mutex neste contexto?**
 
-  return cachedToken
-```
+Servidores de produção processam múltiplas requisições HTTP em paralelo — cada uma em sua própria thread. Se 20 requisições chegarem ao mesmo tempo e o token estiver expirado (ou ainda não emitido), **todas as 20 threads verão o cache vazio e tentarão emitir um novo token ao mesmo tempo**. Isso causaria:
+
+- 20 chamadas simultâneas ao Cognito para o mesmo `client_id`
+- Risco de exceder o limite de 10 ops/s do User Pool
+- Emissão de 20 tokens desnecessários (apenas 1 será usado)
+- Custo desnecessário no modelo de precificação por token
+
+O mutex resolve isso com o padrão **double-check locking**:
+
+1. Thread A adquire o lock (as demais ficam aguardando)
+2. Thread A verifica o cache novamente (double-check) — está vazio → emite token → salva no cache → libera o lock
+3. Thread B adquire o lock → verifica o cache → **token já está lá** → retorna sem chamar o Cognito
+4. Threads C, D, ... fazem o mesmo que B
+
+Resultado: **apenas 1 chamada ao Cognito**, independentemente de quantas threads chegaram ao mesmo tempo.
+
+Em .NET, o mutex assíncrono é implementado com `SemaphoreSlim(1, 1)` — um semáforo configurado para permitir exatamente 1 entrada simultânea, com o método `WaitAsync()` que suspende a coroutine sem bloquear a thread do pool (essencial em código `async/await`).
 
 ---
 
