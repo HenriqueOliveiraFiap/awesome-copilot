@@ -217,16 +217,12 @@ Independentemente da abordagem de cache escolhida, as bibliotecas devem seguir o
 
 ```mermaid
 flowchart LR
-    A(["⏱ 0s\nToken emitido\npelo Cognito"])
-    B(["⚠️ 3540s\nInício da janela\nde renovação proativa\n(60s antes do exp)"])
-    C(["⛔ 3600s\nToken expira\n(as libs nunca chegam aqui)"])
+    A(["0s\nToken emitido\npelo Cognito"])
+    B(["3540s\nInicio da janela de\nrenovacao proativa\n60s antes do exp"])
+    C(["3600s\nToken expira\nAs libs nunca chegam aqui"])
 
-    A -->|"← 3540s usando token normalmente →"| B
-    B -->|"← 60s renovando em background →"| C
-
-    style A fill:#2196F3,color:#fff,stroke:#1565C0
-    style B fill:#FF9800,color:#fff,stroke:#E65100
-    style C fill:#F44336,color:#fff,stroke:#B71C1C
+    A -->|"3540s usando token normalmente"| B
+    B -->|"60s renovando em background"| C
 ```
 
 **Regras das bibliotecas:**
@@ -271,15 +267,13 @@ Cada pod mantém seu próprio cache em memória. É a abordagem padrão para a *
 ```mermaid
 flowchart LR
     subgraph PodA["Pod A (replica 1)"]
-        CA[("IMemoryCache\ntoken: eyJhbG...\nexp: +55min")]
+        CA[("IMemoryCache A\ntoken: eyJhbG...\nexp: +55min")]
     end
     subgraph PodB["Pod B (replica 2)"]
-        CB[("IMemoryCache\ntoken: eyJhbG...\nexp: +55min")]
+        CB[("IMemoryCache B\ntoken: eyJhbG...\nexp: +55min")]
     end
-    Cognito(["☁️ AWS Cognito"])
+    Cognito["AWS Cognito"]
 
-    PodA <-->|lê / escreve| CA
-    PodB <-->|lê / escreve| CB
     CA -->|"emite token (cold-start)"| Cognito
     CB -->|"emite token (cold-start)"| Cognito
 ```
@@ -364,11 +358,11 @@ Todas as réplicas de um mesmo serviço compartilham um único cache externo. É
 flowchart LR
     PodA["Pod A\n(replica 1)"]
     PodB["Pod B\n(replica 2)"]
-    Redis[("Redis / ElastiCache\nkey: m2m_token_svc-x\nvalue: eyJhbG...\nttl: 3540s\n\n★ apenas 1 token compartilhado")]
-    Cognito(["☁️ AWS Cognito"])
+    Redis[("Redis / ElastiCache\nkey: m2m_token_svc-x\nttl: 3540s\napenas 1 token compartilhado")]
+    Cognito["AWS Cognito"]
 
-    PodA <-->|"lê token"| Redis
-    PodB <-->|"lê token"| Redis
+    PodA <-->|"le/grava token"| Redis
+    PodB <-->|"le/grava token"| Redis
     Redis -->|"emite token (apenas 1 vez)"| Cognito
     Cognito -->|"retorna token"| Redis
 ```
