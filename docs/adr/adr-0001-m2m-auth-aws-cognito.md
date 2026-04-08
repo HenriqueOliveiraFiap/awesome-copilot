@@ -619,6 +619,30 @@ Granularidade adicional pode ser implementada futuramente (Fase 2) se necessári
 
 ---
 
+**Opção 2: Construir um Sistema Próprio de Autenticação e Autorização — Descartada**
+
+**Arquitetura:**
+
+- Desenvolvimento interno de um servidor de autorização OAuth 2.0 (emissão, validação e revogação de tokens)
+- Banco de dados próprio para gerenciamento de clientes, credenciais e escopos
+- APIs internas para administração do ciclo de vida de credenciais M2M
+- Infraestrutura dedicada (alta disponibilidade, failover, backups)
+
+**Contras:**
+
+- ❌ **Fora do core business da Aarin:** Autenticação e autorização são problemas resolvidos pela indústria. Investir engenharia nessa camada desvia foco e capacidade de times que deveriam estar entregando valor de negócio
+- ❌ **Custo de manutenção elevado a longo prazo:** Um sistema próprio exige evolução contínua — patches de segurança, suporte a novos fluxos OAuth, atualizações de bibliotecas criptográficas e correções de vulnerabilidades. Esse custo cresce indefinidamente sem gerar diferencial competitivo
+- ❌ **Tempo de desenvolvimento inicial alto:** Implementar um servidor de autorização seguro, compatível com OAuth 2.0/RFC 6749, com cobertura de edge cases (rotação de tokens, revogação, rate limiting, auditoria) demandaria meses de esforço antes de qualquer valor ser entregue aos serviços consumidores
+- ❌ **Custo de gerenciamento complexo:** Operacionalizar um IdP próprio (monitoramento, disponibilidade 99.9%+, runbooks de incidentes, gestão de chaves RSA/JWKS, rotação de segredos) adiciona carga operacional significativa ao time de plataforma, sem SLA ou suporte de fornecedor
+
+**Por que descartamos esta opção:**
+
+- Viola o princípio de **build vs. buy** para componentes não-diferenciadores
+- Introduz risco de segurança real: falhas em sistemas de autenticação caseiros são recorrentes e de alto impacto
+- AWS Cognito já resolve todos os requisitos desta ADR com custo operacional próximo de zero e SLA de 99.9% garantido por contrato
+
+---
+
 ## **Conclusão**
 
 As definições nesta ADR propõem uma evolução significativa na arquitetura de autenticação e autorização entre microsserviços da Aarin, substituindo o modelo atual de **token único compartilhado** por uma solução robusta baseada em **OAuth 2.0 Client Credentials** com **AWS Cognito** como provedor de identidade centralizado.
