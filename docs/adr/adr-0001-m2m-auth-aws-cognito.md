@@ -71,21 +71,13 @@ A solução utiliza controle de acesso baseado em **escopos**, onde cada endpoin
 Durante a análise de alternativas, foram considerados outros provedores de identidade (Auth0, Okta, manutenção do Keycloak). A escolha pelo AWS Cognito se deu pelos seguintes motivos:
 
 - **Já utilizado na Aarin**: o Cognito é o IdP atual para usuários finais (BaaS, BaaS Admin), o que significa familiaridade da equipe, infraestrutura já provisionada e curva de aprendizado reduzida
-- **Ecossistema AWS nativo**: integração direta com Secrets Manager, API Gateway Authorizer, VPC Endpoints, CloudWatch e IAM — sem dependência de SaaS externo de terceiros
+- **Ecossistema AWS nativo**: integração direta com Secrets Manager, API Gateway Authorizer, CloudTrail e IAM — sem dependência de SaaS externo de terceiros
 - **Precificação M2M atualizada**: a AWS removeu o custo fixo de $6 por App Client; o custo ocorre apenas na geração de tokens, o que favorece o modelo de 1 App Client por serviço
-- **VPC Endpoint Privado**: permite emissão de tokens sem tráfego de internet, reduzindo latência e superfície de ataque
 - **Suporte a Client Credentials Grant**: fluxo OAuth 2.0 nativo para M2M, sem necessidade de adaptações
 
-### Decisão: Por que validação no código e não Istio?
+### Decisão: Validação no código (Fase 1)
 
-**Istio Service Mesh** foi cogitado no passado para implementação de controle de acesso direto na camada de rede, no entanto, foi **desconsiderado pela complexidade de implementação** e algo que não precisamos para este momento inicial.
-
-**Para a Fase 1**, seguiremos com **validação JWT via código** (middleware padrão), que resolve 80% dos problemas com 20% da complexidade. Isto também facilita uma eventual migração futura para Istio, pois já teremos:
-
-- Cognito configurado
-- Bibliotecas internas prontas
-- Modelo de scopes validado
-- Times treinados em OAuth 2.0 e novas bibliotecas
+**Para a Fase 1**, seguiremos com **validação JWT via código** (middleware padrão), que resolve 80% dos problemas com 20% da complexidade. Futuras evoluções como Service Mesh (Istio) são descritas na seção de **Fase 2** ao final desta ADR.
 
 A solução é composta por **3 pilares principais**:
 
@@ -100,13 +92,6 @@ O Cognito atua como autoridade central de identidade para todos os serviços int
 - Exclusivo para comunicação entre serviços (separado de usuários finais como BaaS ou BaaS Admin)
 - Domínio OAuth habilitado para emissão de tokens via Client Credentials Grant
 - **Isolamento total**: nenhum usuário humano tem acesso a este pool
-
-### **VPC Endpoint Privado**
-
-- Permite gerar tokens **sem precisar ir para a internet**
-- Comunicação interna via VPC reduz latência e aumenta segurança
-- ⚠️ **Ponto de atenção operacional**: o VPC Endpoint possui custo por hora e por GB processado — deve ser orçado antes do rollout. O cache agressivo nas bibliotecas internas é o principal mecanismo para controlar esse custo
-- ⚠️ **Resiliência**: configurar o endpoint em múltiplas AZs para evitar ponto único de falha de rede
 
 ### **Resource Servers organizados por contexto de negócio**
 
@@ -133,7 +118,7 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em outr
 
 **Governance dos Resource Servers**
 
-⚠️ **Gap identificado (critical-thinking):** Quem é o dono de cada Resource Server? Sem um processo definido, escopos tendem a proliferar de forma desorganizada.
+⚠️ **Gap identificado:** Quem é o dono de cada Resource Server? Sem um processo definido, escopos tendem a proliferar de forma desorganizada.
 
 **Decisão:** Cada Resource Server deve ter um **time de domínio responsável** (owner). Novos escopos só são criados mediante Pull Request no repositório de IaC do Cognito, com aprovação do time dono. Isso garante rastreabilidade e evita que os 100 escopos por servidor sejam esgotados de forma não intencional.
 
@@ -145,13 +130,9 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em outr
 
 ### **Emissão de JWT**
 
-- Tokens assinados com validade curta (TTL recomendado: **300 segundos / 5 minutos**)
+- Tokens assinados com validade de **1 hora** (TTL padrão do Cognito para Access Tokens, compatível com o cache das bibliotecas internas)
 - Contêm os escopos autorizados para o serviço no claim `scope`
 - `ValidateAudience = false`: Cognito Access Tokens não possuem a claim `aud`
-
-⚠️ **Gap de segurança identificado (devils-advocate):** Tokens já emitidos **não podem ser revogados imediatamente**. Se um App Client for comprometido, os tokens em circulação permanecem válidos até o `exp`. Com TTL de 5 minutos, a janela de exposição máxima é de 5 minutos após a rotação do segredo.
-
-**Mitigação:** Rotacionar o client_secret imediatamente no Cognito (o que invalida novas emissões) e aguardar a janela de expiração. O runbook de resposta a incidentes deve documentar esse procedimento e o time de segurança deve estar ciente dessa janela.
 
 ### **JWKS Endpoint**
 
@@ -161,14 +142,13 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em outr
 
 ### **Limites de taxa do Cognito**
 
-⚠️ **Gap operacional identificado (devils-advocate):** O Cognito impõe por padrão **10 operações de token por segundo** por User Pool.
+⚠️ **Gap operacional:** O Cognito impõe por padrão **10 operações de token por segundo** por User Pool.
 
-Com 76+ serviços, picos de cold-start (reinicialização simultânea de pods após deploy) podem estourar esse limite, causando falhas em cascata na autenticação M2M.
+Com cache de 1 hora nas bibliotecas internas, a frequência de chamadas ao Cognito é drasticamente reduzida (cerca de 1 emissão por serviço por hora). Ainda assim, picos de cold-start (reinicialização simultânea de pods após deploy) podem estourar o limite.
 
 **Mitigações:**
-- Cache in-process nas bibliotecas internas reduz drasticamente a frequência de emissão
-- Para serviços com múltiplas réplicas: cache distribuído via ElastiCache Redis (evita thundering herd — múltiplas réplicas renovando o mesmo token simultaneamente)
-- Renovação proativa 30 segundos antes da expiração com mutex/lock por instância
+- Cache in-process com TTL de 1 hora nas bibliotecas internas (principal mecanismo)
+- Renovação proativa 60 segundos antes da expiração com mutex/lock por instância (evita múltiplas réplicas do mesmo serviço renovando o token ao mesmo tempo)
 - **Solicitar elevação da quota via AWS Support antes do rollout geral**
 
 ### **Curva de aprendizado**
@@ -202,7 +182,7 @@ Criação de **bibliotecas M2M** que são pacotes internos que abstraem completa
 
 - Middleware JWT padrão (.NET: `Microsoft.AspNetCore.Authentication.JwtBearer`, Node.js: `aws-jwt-verify`)
 
-> ⚠️ **Gap identificado (critical-thinking):** O sucesso da solução depende criticamente da **adoção das bibliotecas**. Se equipes contornarem as bibliotecas e implementarem autenticação ad-hoc, os benefícios de padronização e segurança são perdidos.
+> ⚠️ **Gap:** O sucesso da solução depende criticamente da **adoção das bibliotecas**. Se equipes contornarem as bibliotecas e implementarem autenticação ad-hoc, os benefícios de padronização e segurança são perdidos.
 >
 > **Mitigação:** A etapa de CI/CD (descrita na seção de Prevenção de Compartilhamento de Credenciais) deve validar que a biblioteca oficial está sendo utilizada. O template `helm-aarin-base` deve tornar o uso das bibliotecas o caminho de menor resistência — mais fácil usar do que ignorar.
 
@@ -235,7 +215,7 @@ builder.Services.AddAuthorization(options =>
     // Policy que verifica se o token tem o scope "core-context/all"
     options.AddPolicy("CoreAccess", policy =>
         policy.RequireClaim("scope", "core-context/all"));
-    
+
     // Outras policies para scopes mais específicos (se necessário)
     options.AddPolicy("CreateAccount", policy =>
         policy.RequireClaim("scope", "core-context/criar-conta"));
@@ -283,11 +263,9 @@ app.use((req, res, next) => {
 });
 ```
 
-> ⚠️ **Nota:** A biblioteca `express-jwt` mencionada na v2 está em modo manutenção. **Recomendamos `aws-jwt-verify`**, que é a biblioteca oficial da AWS para validação de tokens Cognito, com suporte ativo e cache nativo de JWKS.
-
 ### **Validação em Dupla Camada (Zero Trust)**
 
-⚠️ **Gap de segurança identificado (se-system-architecture-reviewer):** Confiar apenas no API Gateway Authorizer cria um ponto cego — se uma requisição chegar ao serviço por outro caminho (ex: comunicação interna direta entre pods), ela não passaria pelo authorizer.
+⚠️ **Gap de segurança:** Confiar apenas no API Gateway Authorizer cria um ponto cego — se uma requisição chegar ao serviço por outro caminho (ex: comunicação interna direta entre pods), ela não passaria pelo authorizer.
 
 **Decisão:** Cada serviço exposto deve validar o JWT **independentemente**, mesmo quando o API Gateway já validou:
 
@@ -335,18 +313,9 @@ Isso implementa o princípio de **Zero Trust**: nunca confiar, sempre verificar.
 - Validar que credenciais corretas estão configuradas no Secrets Manager
 - Verificar ausência de credenciais M2M hardcoded no código
 
-### **Rotação de Segredos**
+### **Gerenciamento de Segredos**
 
-⚠️ **Gap operacional identificado (se-system-architecture-reviewer):** A v2 não definia como e quando os `client_secrets` seriam rotacionados.
-
-**Decisão:** Implementar rotação automática via AWS Secrets Manager com ciclo de **90 dias**, usando Lambda de rotação que implementa o protocolo de 4 etapas:
-
-1. `createSecret` — gera novo segredo
-2. `setSecret` — atualiza o App Client no Cognito com o novo segredo
-3. `testSecret` — valida que o novo segredo funciona (gera um token de teste)
-4. `finishSecret` — promove o novo segredo como versão atual
-
-Alarme CloudWatch configurado para falhas no ciclo de rotação.
+Credenciais dos App Clients ficam armazenadas no **AWS Secrets Manager** com expiração longa na Fase 1 — a rotação será feita manualmente conforme definição do time de Segurança (ex: anual ou semestral), seguindo o runbook documentado. A automação da rotação poderá ser avaliada em fases futuras.
 
 ### **Atenção: Scopes não possuem hierarquia**
 
@@ -374,32 +343,17 @@ Granularidade adicional pode ser implementada futuramente (Fase 2) se necessári
 
 ### **Observabilidade e Auditoria**
 
-⚠️ **Gap identificado (se-system-architecture-reviewer):** A v2 não definia como monitorar a saúde do sistema M2M em produção.
+⚠️ **Gap identificado:** A v2 não definia como monitorar a saúde do sistema M2M em produção.
 
-**Métricas obrigatórias no CloudWatch:**
+**Métricas a instrumentar no Datadog:**
 
-- `TaxaEmissaoToken` por `client_id` — detecta serviços com cache mal configurado
-- `FalhasValidacaoJWT` por serviço — detecta tokens expirados ou comprometidos
-- `TentativasViolacaoEscopo` — detecta serviços tentando acessar recursos sem permissão
-- `FalhasRotacaoSegredo` — alerta imediato se o ciclo de rotação falhar
+- `m2m.token.emissao` por `client_id` — detecta serviços com cache mal configurado
+- `m2m.jwt.falha_validacao` por serviço — detecta tokens inválidos ou expirados inesperadamente
+- `m2m.jwt.violacao_escopo` — detecta serviços tentando acessar recursos sem permissão
 
-**Dashboard CloudWatch** com painel de saúde M2M para o time de Plataforma/DevOps.
+**Dashboard Datadog** com painel de saúde M2M para o time de Plataforma/DevOps.
 
-**Auditoria:** Todos os eventos de emissão de token são registrados no CloudTrail do Cognito com `client_id`, timestamp e escopos solicitados — habilitando rastreabilidade completa para fins de compliance.
-
-### **Plano de Migração Keycloak → Cognito**
-
-⚠️ **Gap identificado (critical-thinking):** A v2 propunha substituir o Keycloak, mas não definia como realizar essa transição sem interrupção dos serviços.
-
-**Estratégia de migração em fases:**
-
-1. **Fase 0 — Setup**: provisionar User Pool M2M, Resource Servers, VPC Endpoint e App Clients para serviços piloto (2-3 serviços do Core)
-2. **Fase 1 — Piloto**: migrar serviços piloto para Cognito em paralelo ao Keycloak (dual-write, validação de ambos)
-3. **Fase 2 — Rollout Core**: migrar todos os serviços do Core context, descomissionar tokens Keycloak para esse contexto
-4. **Fase 3 — Rollout Geral**: expandir para demais contextos (kyc, fee, ledger, etc.)
-5. **Fase 4 — Descomissionamento**: remover Keycloak M2M após todos os contextos migrados
-
-> Estimativa para Fase 1 (core-to-core): **3–6 meses** conforme indicado na v2.
+**Auditoria:** Todos os eventos de emissão de token são registrados automaticamente no **AWS CloudTrail** do Cognito (sem configuração adicional), com `client_id`, timestamp e escopos solicitados — habilitando rastreabilidade completa para fins de compliance.
 
 ---
 
@@ -409,11 +363,10 @@ Granularidade adicional pode ser implementada futuramente (Fase 2) se necessári
 
 **Arquitetura:**
 
-- AWS Cognito para emissão de tokens M2M (removemos Keycloak)
-- VPC Endpoint Privado (sem internet)
+- AWS Cognito para emissão de tokens M2M (substituição do Keycloak)
 - Resource Servers por contexto de negócio
 - **Bibliotecas internas** para obtenção de tokens (padronizamos implementação)
-- **Validação JWT via código** em cada API (sem Istio)
+- **Validação JWT via código** em cada API
   - .NET: `Microsoft.AspNetCore.Authentication.JwtBearer`
   - Node.js: `aws-jwt-verify`
   - Lambda: Validação no API Gateway ou IAM Policies
@@ -424,7 +377,6 @@ Granularidade adicional pode ser implementada futuramente (Fase 2) se necessári
 - ✅ Desenvolvedores já conhecem (middleware JWT padrão)
 - ✅ Sem overhead de sidecars
 - ✅ Menor complexidade operacional
-- ✅ VPC Endpoint reduz latência (sem internet)
 - ✅ Implementação rápida (estimativa core-to-core: 3–6 meses)
 - ✅ Ecossistema AWS nativo — sem dependência de SaaS externo
 - ✅ Curva de aprendizado baixa (Cognito já é utilizado na Aarin)
@@ -435,43 +387,18 @@ Granularidade adicional pode ser implementada futuramente (Fase 2) se necessári
 - ❌ Sem mTLS automático entre pods
 - ❌ Sem canary/blue-green nativos
 - ❌ Sem observabilidade de rede automática
-- ❌ Janela de até 5 minutos de exposição após revogação de credencial comprometida
 
 **Por que escolhemos esta opção:**
 
 - Resolve **80% dos problemas** (token único, rastreabilidade, revogação granular) com **20% da complexidade**
 - Permite validar modelo de scopes antes de investir em service mesh
-- Facilita migração futura para Istio se necessário
+- Facilita migração futura para Istio (Fase 2) se necessário
 
-### **Opção 2: Istio Service Mesh — REAVALIAÇÃO FUTURA (FASE 2)**
-
-**Arquitetura:**
-
-- Tudo da Opção 1 +
-- Istio Service Mesh para validação na camada de rede
-
-**Por que NÃO escolhemos agora:**
-
-- Alta complexidade operacional
-- Curva de aprendizado íngreme
-- Requer equipe de SRE dedicada
-- Não precisamos neste momento inicial
-
-**Quando reavaliar Istio:**
-
-✅ Crescimento significativo de microsserviços
-
-✅ Requisitos de compliance obrigatórios (SOC 2, PCI-DSS com mTLS)
-
-✅ Necessidade comprovada de canary deployments ou blue-green, circuit breakers
-
-✅ Maturidade em Kubernetes consolidada
-
-### **Opção 3: Manutenção do Keycloak/Gatekeeper — Rejeitada**
+### **Opção 2: Manutenção do Keycloak/Gatekeeper — Rejeitada**
 
 Manter o modelo atual não resolve nenhum dos problemas identificados: token compartilhado, ausência de rastreabilidade, violação do menor privilégio. Adicionalmente, o Keycloak opera por **exclusão de permissões**, o que torna o modelo propício a erros operacionais (esquecer de remover um escopo de um serviço novo). Rejeitado.
 
-### **Opção 4: Auth0 / Okta para M2M — Rejeitada**
+### **Opção 3: Auth0 / Okta para M2M — Rejeitada**
 
 Provedores de identidade dedicados para M2M com modelo de escopos mais flexível e experiência de desenvolvedor superior. Rejeitados por introduzir dependência de SaaS de terceiros em uma organização AWS-nativa, custo adicional e esforço de integração sem benefício incremental para o contexto atual.
 
@@ -481,18 +408,7 @@ Provedores de identidade dedicados para M2M com modelo de escopos mais flexível
 
 As definições nesta ADR propõem uma evolução significativa na arquitetura de autenticação e autorização entre microsserviços da Aarin, substituindo o modelo atual de **token único compartilhado** por uma solução robusta baseada em **OAuth 2.0 Client Credentials** com **AWS Cognito** como provedor de identidade centralizado.
 
-Em relação à v2, esta versão mantém a decisão arquitetural central e aprofunda a solução com:
-
-- Ênfase nos detalhes de configuração e operação do AWS Cognito (TTL, limites de taxa, JWKS, governance de Resource Servers)
-- Correção de gaps de segurança (Zero Trust em dupla camada, janela de revogação, rotação de segredos)
-- Correção de gaps operacionais (plano de migração Keycloak→Cognito, observabilidade, alarmes)
-- Correção de gaps de adoção (governança das bibliotecas internas, CI/CD enforcement)
-
-## **Decisão Arquitetural Recomendada**
-
-Após análise detalhada dos trade-offs, **recomendamos uma abordagem evolutiva em duas fases**:
-
-### **Fase 1: Fundação Segura**
+## **Decisão Arquitetural — Fase 1**
 
 ✅ **AWS Cognito M2M** como IdP centralizado (substituição do Keycloak)
 
@@ -502,11 +418,11 @@ Após análise detalhada dos trade-offs, **recomendamos uma abordagem evolutiva 
 
 ✅ **Scopes globais** por contexto (`{contexto}/all`) para simplificar adoção inicial
 
-✅ **Secrets Manager** para gerenciamento seguro de credenciais M2M com rotação automática de 90 dias
+✅ **Secrets Manager** para gerenciamento de credenciais M2M com expiração longa (rotação manual na Fase 1)
 
 ✅ **helm-aarin-base** + External Secrets Operator para prevenção de compartilhamento de credenciais
 
-✅ **Observabilidade** via CloudWatch (métricas, alarmes, dashboard e auditoria via CloudTrail)
+✅ **Observabilidade** via Datadog (métricas de emissão, falhas de validação e violações de escopo) e auditoria via AWS CloudTrail
 
 **Justificativa:** Esta fase resolve **80% dos problemas** identificados (token único, falta de rastreabilidade, ausência de revogação granular) com complexidade operacional mínima e permite que a Aarin:
 
@@ -516,17 +432,45 @@ Após análise detalhada dos trade-offs, **recomendamos uma abordagem evolutiva 
 - Padronize autenticação em bibliotecas reutilizáveis
 - Valide o modelo de scopes antes de investir em Service Mesh
 
-### **Fase 2: Service Mesh com Istio — Avaliação futura (12 meses depois da Fase 1)**
+---
 
-**Reavaliar a necessidade de Istio** após consolidar a Fase 1, considerando:
+## **Fase 2 — Evoluções Futuras**
+
+Esta seção consolida todas as evoluções consideradas, mas que **não fazem parte do escopo da Fase 1**. Reavaliar após consolidação e estabilidade da Fase 1 (estimativa: 12 meses após rollout).
+
+### **Service Mesh com Istio**
+
+Adicionar Istio à malha de serviços para validação de identidade na camada de rede:
+
+**Arquitetura complementar:**
+
+- Tudo da Fase 1 +
+- Istio Service Mesh para validação JWT na camada de rede (sidecar Envoy)
+- mTLS automático entre pods
+- Políticas de autorização centralizadas (`RequestAuthentication` + `AuthorizationPolicy`)
+- Observabilidade de rede automática (traces, métricas de latência por serviço)
 
 **Gatilhos que justificam adoção do Istio:**
 
-- ✅ Crescimento de microsserviços e necessidade de políticas uniformes
-- ✅ **Requisitos de compliance** (SOC 2, PCI-DSS) exigindo mTLS obrigatório
-- ✅ **Necessidade comprovada** de canary deployments, circuit breakers, rate limiting
-- ✅ **Equipe de Platform Engineering** estabelecida (SREs dedicados)
-- ✅ **Maturidade em Kubernetes** consolidada (troubleshooting avançado, GitOps maduro)
+- ✅ Crescimento significativo de microsserviços e necessidade de políticas uniformes
+- ✅ Requisitos de compliance obrigatórios (SOC 2, PCI-DSS) exigindo mTLS obrigatório
+- ✅ Necessidade comprovada de canary deployments, circuit breakers ou rate limiting na malha
+- ✅ Equipe de Platform Engineering estabelecida (SREs dedicados)
+- ✅ Maturidade em Kubernetes consolidada (troubleshooting avançado, GitOps maduro)
+
+**Por que não agora:**
+
+- Alta complexidade operacional e curva de aprendizado íngreme
+- Requer equipe de SRE dedicada
+- A Fase 1 já resolve os principais problemas de segurança e rastreabilidade
+
+### **Granularidade de Escopos**
+
+Evoluir dos scopes genéricos por contexto (`{contexto}/all`) para scopes granulares por operação (`{contexto}/{operacao}`), permitindo controle de acesso mais fino. Requer validação de que o modelo de 100 escopos por Resource Server não será atingido e que o esforço de gestão é justificado pelo nível de controle necessário.
+
+### **Automação da Rotação de Segredos**
+
+Implementar rotação automática de `client_secrets` via AWS Secrets Manager com Lambda de rotação (protocolo de 4 etapas: `createSecret`, `setSecret`, `testSecret`, `finishSecret`). Reavaliar quando o volume de serviços e a criticidade de segurança justificarem o overhead operacional de manter a Lambda de rotação.
 
 ---
 
@@ -536,7 +480,7 @@ Após análise detalhada dos trade-offs, **recomendamos uma abordagem evolutiva 
 - [AWS Cognito — Client Credentials Grant](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-userpools-server-contract-reference.html)
 - [AWS Cognito — Resource Servers and Scopes](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pools-define-resource-servers.html)
 - [AWS Cognito — Service Quotas e Limites](https://docs.aws.amazon.com/cognito/latest/developerguide/limits.html)
-- [AWS Secrets Manager — Rotação de Segredos](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotating-secrets.html)
+- [AWS Secrets Manager — Gerenciamento de Segredos](https://docs.aws.amazon.com/secretsmanager/latest/userguide/intro.html)
 - [aws-jwt-verify — Biblioteca Oficial AWS para Validação JWT](https://github.com/awslabs/aws-jwt-verify)
 - [Istio — Security](https://istio.io/latest/docs/concepts/security/)
 - [Istio — Authorization Policy](https://istio.io/latest/docs/reference/config/security/authorization-policy/)
