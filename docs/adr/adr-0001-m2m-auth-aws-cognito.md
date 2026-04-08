@@ -113,12 +113,14 @@ Considerando que temos **76 serviços apenas no Core** (e mais serviços em ou
     
     Fórmula: `(tokens ÷ 1.000) × preço_do_tier`
     
-    | **Cenário** | **Tokens/mês** | **Cálculo por tier** | **Custo estimado/mês** |
-    | --- | --- | --- | --- |
-    | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | 216 × $2,25 (Tier 1) | **~$486** |
-    | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | 250 × $2,25 + 182 × $1,50 (Tier 1+2) | **~$835** |
-    | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | 250 × $2,25 + 188 × $1,50 (Tier 1+2) | **~$845** |
+    | **Cenário** | **Tokens/mês** | **Cálculo por tier** | **Custo estimado/mês** | **Custo/serviço/mês** (2 pods) |
+    | --- | --- | --- | --- | --- |
+    | **Otimista** — cache distribuído com mutex: 1 token/serviço/hora | 300 × 24 × 30 = **216.000** | 216 × $2,25 (Tier 1) | **~$486** | 720 tokens × $2,25/1.000 = **~$1,62** |
+    | **Realista** — cache in-process por pod (sem mutex): 2 tokens/serviço/hora | 600 × 24 × 30 = **432.000** | 250 × $2,25 + 182 × $1,50 (Tier 1+2) | **~$835** | 1.440 tokens × $2,25/1.000 = **~$3,24** |
+    | **Conservador** — inclui cold-starts de deploys (10 rollouts/mês × 600 pods) | ~438.000 | 250 × $2,25 + 188 × $1,50 (Tier 1+2) | **~$845** | ~1.460 tokens × $2,25/1.000 = **~$3,29** |
     
+    > 💡 **Custo por serviço:** Considerando o mínimo de 2 pods por serviço com cache in-process (cenário Realista), cada serviço emite 2 tokens/hora × 24h × 30 dias = **1.440 tokens/mês**, custando aproximadamente **$3,24/serviço/mês**. Com cache distribuído e mutex (cenário Otimista), os 2 pods compartilham 1 único token cacheado por hora, reduzindo para 720 tokens/mês e **~$1,62/serviço/mês**.
+    >
     > 💡 **Conclusão:** O cenário Otimista (com cache distribuído e mutex, evitando requisições duplicadas entre pods) mantém o volume abaixo de 250.000/mês e fica inteiramente no **Tier 1 (~$486/mês)**. Os cenários Realista e Conservador ultrapassam esse limite e entram no Tier 2, custando **~$835–$845/mês**. O principal mecanismo de controle de custo é o cache de 1 hora nas bibliotecas internas — que também protege contra os limites de taxa do Cognito (10 ops/s por User Pool). Considerar cache distribuído com mutex reduz o custo em ~42%.
     > 
 - Credenciais armazenadas no **AWS Secrets Manager** com path padronizado: `/m2m/{ambiente}/{nome-do-servico}/client-secret`
