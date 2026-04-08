@@ -368,6 +368,7 @@ public class CognitoTokenService : ICognitoTokenService
 - ❌ Latência de leitura de cache levemente maior (rede vs. memória local)
 - ❌ Se o Redis ficar indisponível, todos os pods perdem o cache simultaneamente (single point of failure de cache)
 - ❌ Necessidade de mutex distribuído (mais complexidade de implementação)
+- ❌ **Risco de segurança — visibilidade cruzada de tokens entre serviços:** Em um Redis compartilhado entre múltiplos serviços (o cenário mais comum em plataformas Kubernetes), qualquer serviço com acesso à instância pode ler as chaves de qualquer outro serviço. Isso significa que o `ServiceA` poderia, acidentalmente ou maliciosamente, ler e reutilizar o token M2M do `ServiceB`, quebrando o princípio de menor privilégio e invalidando o modelo Zero Trust. Mitigações são possíveis (namespacing de chaves, Redis ACLs por serviço, criptografia em repouso), mas aumentam ainda mais a complexidade operacional e não eliminam completamente o risco de má configuração
 
 **Quando justifica adoção:**
 
@@ -392,6 +393,7 @@ public class CognitoTokenService : ICognitoTokenService
 | **Latência de cache hit** | ~0ms (memória) | ~1–5ms (rede local) |
 | **Impacto em HPA agressivo** | Alto (N novos pods = N novas emissões) | Mínimo (pods leem do Redis) |
 | **Implementação** | ~30 linhas, sem dependências externas | ~60 linhas + dependência Redis + mutex distribuído |
+| **Isolamento de tokens** | ✅ Total — token existe apenas na memória do processo | ⚠️ Risco — Redis compartilhado expõe tokens a outros serviços |
 | **Fase recomendada** | **Fase 1** | Fase 2 (critérios acima) |
 
 ---
@@ -407,6 +409,8 @@ public class CognitoTokenService : ICognitoTokenService
 > - Alertas de `m2m.token.emissao` no Datadog indicando pico de emissões próximo ao limite de 10 ops/s do Cognito
 > - Volume mensal de tokens aproximando-se de 250.000 (fronteira entre Tier 1 e Tier 2 de custo)
 > - Rollouts simultâneos frequentes de grande número de serviços
+> 
+> ⚠️ **Pré-requisito de segurança para adoção do Redis:** Antes de migrar para cache distribuído, é **obrigatório** implementar isolamento de acesso entre serviços na instância Redis. As opções incluem: (a) instâncias Redis dedicadas por serviço ou grupo de serviços, (b) Redis ACLs com usuários e senhas por serviço com keyspace restrito via prefixo, ou (c) criptografia de token em repouso com chave por serviço. Adotar Redis compartilhado sem isolamento viola o modelo Zero Trust desta ADR — qualquer serviço com acesso à instância poderia ler tokens de outros serviços e se passar por eles.
 > 
 > As bibliotecas internas serão projetadas desde o início com **inversão de dependência** (`ITokenCache` como abstração), de modo que a troca de cache local para distribuído seja uma mudança de configuração de DI, sem necessidade de alterar o código dos serviços consumidores.
 > 
