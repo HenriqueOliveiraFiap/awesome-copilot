@@ -207,6 +207,261 @@ Criação de **bibliotecas M2M** que são pacotes internos que abstraem completa
 
 ---
 
+### **2.1 Estratégia de Cache e Renovação de Tokens**
+
+Um dos pilares mais importantes das bibliotecas internas é o **gerenciamento de ciclo de vida do token**: obter um token somente quando necessário, mantê-lo válido durante sua vigência e renová-lo **de forma proativa**, sem jamais deixar uma requisição falhar por token expirado. Esta seção descreve as duas abordagens disponíveis e os critérios para escolha entre elas.
+
+#### **Princípio: Renovação Proativa (Pre-emptive Refresh)**
+
+Independentemente da abordagem de cache escolhida, as bibliotecas devem seguir o seguinte contrato de ciclo de vida:
+
+```
+Token TTL = 3600s (1 hora — padrão do Cognito)
+
+┌─────────────────────────────────────────────────────────────┐
+│ 0s          3540s       3600s                               │
+│  │───────────────────────│────│                             │
+│  │  Token válido          │    │                             │
+│  │                        │    └─ Token expirado (nunca      │
+│  │                        │       chega aqui nas libs)      │
+│  │                        └─ Janela de renovação proativa   │
+│  │                           (60s antes do exp)             │
+│  └─ Token emitido pelo Cognito                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Regras das bibliotecas:**
+
+1. **Renovar 60 segundos antes da expiração** — garante que o token esteja sempre fresco quando injetado em uma requisição HTTP, sem buracos de autenticação entre threads concorrentes
+2. **Mutex/lock por instância** — evitar que múltiplas threads do mesmo pod disparem chamadas simultâneas ao Cognito para o mesmo `client_id` (thundering herd local)
+3. **Fallback tolerante** — se a renovação proativa falhar (Cognito indisponível), a biblioteca deve ainda tentar usar o token em cache enquanto ele não tiver expirado, e só lançar exceção quando não houver token válido algum
+4. **Cache sensível ao `exp`** — o TTL de cache deve ser calculado dinamicamente a partir do claim `exp` do JWT retornado, não de um valor fixo hardcoded. Isso garante compatibilidade se o Cognito retornar um TTL diferente de 3600s no futuro
+
+**Pseudocódigo do ciclo de vida (agnóstico de linguagem):**
+
+```
+function getValidToken(clientId):
+  cachedToken = cache.get(clientId)
+
+  if cachedToken is null or isExpiredOrExpiresSoon(cachedToken, thresholdSeconds=60):
+    lock.acquire(clientId):          // mutex por client_id
+      cachedToken = cache.get(clientId)  // double-check após lock
+      if cachedToken is null or isExpiredOrExpiresSoon(cachedToken, thresholdSeconds=60):
+        newToken = cognito.issueToken(clientId, clientSecret)
+        ttl = newToken.exp - now() - 10   // guardar com 10s de margem extra
+        cache.set(clientId, newToken, ttl)
+        cachedToken = newToken
+    lock.release(clientId)
+
+  return cachedToken
+```
+
+---
+
+#### **Abordagem 1 — Cache Local (In-Process / IMemoryCache)**
+
+Cada pod mantém seu próprio cache em memória. É a abordagem padrão para a **Fase 1**.
+
+**Funcionamento:**
+
+```
+┌─────────────┐          ┌──────────────────────┐          ┌─────────────┐
+│  Pod A      │          │  IMemoryCache (Pod A) │          │             │
+│  (replica 1)│ ────────▶│  token: eyJhbG...    │          │   AWS       │
+│             │◀──────── │  exp: +55min          │          │   Cognito   │
+└─────────────┘          └──────────────────────┘          │             │
+                                                             │             │
+┌─────────────┐          ┌──────────────────────┐          │             │
+│  Pod B      │          │  IMemoryCache (Pod B) │          │             │
+│  (replica 2)│ ────────▶│  token: eyJhbG...    │──────────▶             │
+│             │◀──────── │  exp: +55min          │◀──────── │             │
+└─────────────┘          └──────────────────────┘          └─────────────┘
+
+Resultado: 2 pods × 1 token cada = 2 tokens válidos e independentes circulando
+```
+
+**Por que múltiplos tokens simultâneos são aceitos:**
+
+O Cognito (e qualquer IdP que implemente OAuth 2.0 corretamente) **não invalida tokens anteriores** quando um novo é emitido para o mesmo `client_id`. Dois tokens emitidos em momentos diferentes para o mesmo App Client são igualmente válidos até seu respectivo `exp`. Isso é intencional no protocolo — o receptor valida apenas assinatura, `iss` e `exp`, independentemente de quantos tokens existem em circulação.
+
+**Implementação .NET:**
+
+```csharp
+public class CognitoTokenService : ICognitoTokenService
+{
+    private readonly IMemoryCache _cache;
+    private readonly SemaphoreSlim _lock = new(1, 1);
+    private readonly CognitoM2MOptions _options;
+
+    public async Task<string> GetTokenAsync(CancellationToken ct = default)
+    {
+        var cacheKey = $"m2m_token_{_options.ClientId}";
+
+        if (_cache.TryGetValue(cacheKey, out string cachedToken))
+            return cachedToken;
+
+        await _lock.WaitAsync(ct);
+        try
+        {
+            // Double-check após adquirir o lock
+            if (_cache.TryGetValue(cacheKey, out cachedToken))
+                return cachedToken;
+
+            var response = await _cognitoClient.IssueTokenAsync(_options);
+            var expiresIn = response.ExpiresIn; // segundos até expiração (ex: 3600)
+            var renewBefore = TimeSpan.FromSeconds(expiresIn - 60); // renovar 60s antes
+
+            _cache.Set(cacheKey, response.AccessToken, renewBefore);
+            return response.AccessToken;
+        }
+        finally
+        {
+            _lock.Release();
+        }
+    }
+}
+```
+
+**Prós:**
+
+- ✅ Zero dependência de infraestrutura externa (sem Redis, sem ElastiCache)
+- ✅ Latência de cache próxima de zero (memória local do processo)
+- ✅ Sem custo adicional de infraestrutura
+- ✅ Sem complexidade operacional adicional
+- ✅ Totalmente suficiente para a grande maioria dos cenários com cache de 1h
+
+**Contras:**
+
+- ❌ Cada pod emite seu próprio token ao iniciar (cold-start) — impacto na taxa do Cognito durante scale-out rápido
+- ❌ Sem coordenação entre réplicas — `N` pods = até `N` tokens em circulação
+- ❌ Cold-start em batch (ex: deploy que reinicia 50 pods simultaneamente) pode saturar o limite de 10 ops/s do Cognito
+- ❌ Cache perdido ao reiniciar o pod (próximo start emite novo token)
+
+**Quando é suficiente:**
+
+| Fator | Threshold seguro para cache local |
+|---|---|
+| Número de pods por serviço | ≤ 10–15 réplicas |
+| Frequência de scale-out (HPA) | Escalonamento gradual (não instantâneo de 0→N) |
+| Número total de serviços × pods | ≤ ~300 pods simultâneos (para ficar abaixo de 10 ops/s médio) |
+| Frequência de deploys | ≤ 10 deploys/dia com rollout gradual |
+
+---
+
+#### **Abordagem 2 — Cache Distribuído (Redis / ElastiCache)**
+
+Todas as réplicas de um mesmo serviço compartilham um único cache externo. É a abordagem para cenários de **alta escala ou HPA agressivo**.
+
+**Funcionamento:**
+
+```
+┌─────────────┐
+│  Pod A      │──────────┐
+│  (replica 1)│          │          ┌─────────────────────────┐          ┌─────────────┐
+└─────────────┘          ├─────────▶│  Redis / ElastiCache    │          │             │
+                          │          │  key: m2m_token_svc-x   │──────────▶   AWS       │
+┌─────────────┐          │          │  value: eyJhbG...        │◀──────── │   Cognito   │
+│  Pod B      │──────────┘          │  ttl: 3540s              │          │             │
+│  (replica 2)│◀────────────────────│                          │          └─────────────┘
+└─────────────┘                     └─────────────────────────┘
+                                     (apenas 1 token compartilhado)
+```
+
+**Implementação .NET (com `IDistributedCache`):**
+
+```csharp
+public class CognitoTokenService : ICognitoTokenService
+{
+    private readonly IDistributedCache _distributedCache;
+    private readonly IConnectionMultiplexer _redis;  // para mutex distribuído
+    private readonly CognitoM2MOptions _options;
+
+    public async Task<string> GetTokenAsync(CancellationToken ct = default)
+    {
+        var cacheKey = $"m2m_token_{_options.ClientId}";
+        var lockKey = $"m2m_lock_{_options.ClientId}";
+
+        var cached = await _distributedCache.GetStringAsync(cacheKey, ct);
+        if (cached is not null) return cached;
+
+        // Mutex distribuído — apenas 1 pod emite o token, os demais aguardam
+        await using var redisLock = await _redis.AcquireLockAsync(lockKey, timeout: 5s);
+        {
+            cached = await _distributedCache.GetStringAsync(cacheKey, ct);
+            if (cached is not null) return cached;
+
+            var response = await _cognitoClient.IssueTokenAsync(_options);
+            var ttl = TimeSpan.FromSeconds(response.ExpiresIn - 60);
+
+            await _distributedCache.SetStringAsync(cacheKey, response.AccessToken,
+                new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = ttl }, ct);
+
+            return response.AccessToken;
+        }
+    }
+}
+```
+
+> 💡 A abstração `IDistributedCache` do .NET permite trocar a implementação entre Redis, Memcached ou SQL Server sem alterar o código da biblioteca — apenas a configuração do DI muda.
+
+**Prós:**
+
+- ✅ 1 token por serviço (independentemente do número de pods) — custo mínimo com Cognito
+- ✅ Scale-out instantâneo (100 novos pods) não gera 100 chamadas ao Cognito — todos leem do Redis
+- ✅ Resiliente a cold-starts massivos de deploy
+- ✅ Elimina risco de saturar o limite de 10 ops/s do Cognito em cenários de HPA agressivo
+- ✅ Cache compartilhado sobrevive ao reinício de pods individuais
+
+**Contras:**
+
+- ❌ Dependência de infraestrutura Redis/ElastiCache (custo, disponibilidade, latência de rede)
+- ❌ Complexidade operacional maior (gestão de ElastiCache, HA, failover)
+- ❌ Latência de leitura de cache levemente maior (rede vs. memória local)
+- ❌ Se o Redis ficar indisponível, todos os pods perdem o cache simultaneamente (single point of failure de cache)
+- ❌ Necessidade de mutex distribuído (mais complexidade de implementação)
+
+**Quando justifica adoção:**
+
+| Fator | Threshold que justifica Redis |
+|---|---|
+| Pods por serviço | > 15 réplicas estáveis |
+| HPA | Scale-out de ≥ 20 pods em < 60s frequentemente |
+| Deploys simultâneos | > 10 serviços fazendo rollout em paralelo |
+| Orçamento Cognito | Necessidade de ficar abaixo do Tier 1 (< 250k tokens/mês) |
+| Compliance | Rastreabilidade de qual token específico está em uso em cada momento |
+
+---
+
+#### **Comparativo das Abordagens**
+
+| Dimensão | Cache Local (IMemoryCache) | Cache Distribuído (Redis) |
+|---|---|---|
+| **Complexidade** | Baixa | Alta |
+| **Custo de infra** | Zero | Redis/ElastiCache (~$50–200/mês para HA) |
+| **Tokens simultâneos** | 1 por pod | 1 por serviço |
+| **Resiliência a scale-out** | Moderada | Alta |
+| **Latência de cache hit** | ~0ms (memória) | ~1–5ms (rede local) |
+| **Impacto em HPA agressivo** | Alto (N novos pods = N novas emissões) | Mínimo (pods leem do Redis) |
+| **Implementação** | ~30 linhas, sem deps externas | ~60 linhas + dep Redis + mutex distribuído |
+| **Fase recomendada** | **Fase 1** | Fase 2 (critérios acima) |
+
+---
+
+> ⚠️ **Disclaimer — Estratégia de Evolução Gradual**
+>
+> **Para a Fase 1, adotaremos Cache Local (IMemoryCache) como estratégia padrão das bibliotecas internas.** Essa decisão é intencional: o cache local resolve o problema de custo e rate limit do Cognito para a grande maioria dos cenários da Aarin no momento atual, sem introduzir dependência de infraestrutura adicional.
+>
+> **A migração para Cache Distribuído (Redis) será considerada como evolução em uma fase futura**, quando um ou mais dos seguintes gatilhos forem observados em produção:
+>
+> - Serviços com HPA configurado para escalar agressivamente (ex: 0→50 pods em burst de eventos)
+> - Alertas de `m2m.token.emissao` no Datadog indicando pico de emissões próximo ao limite de 10 ops/s do Cognito
+> - Volume mensal de tokens aproximando-se de 250.000 (fronteira entre Tier 1 e Tier 2 de custo)
+> - Rollouts simultâneos frequentes de grande número de serviços
+>
+> As bibliotecas internas serão projetadas desde o início com **inversão de dependência** (`ITokenCache` como abstração), de modo que a troca de cache local para distribuído seja uma mudança de configuração de DI, sem necessidade de alterar o código dos serviços consumidores.
+
+---
+
 ## **3. Validação JWT via Código em Cada Serviço**
 
 Cada serviço que expõe APIs valida tokens usando middleware padrão da linguagem, exemplos simples:
