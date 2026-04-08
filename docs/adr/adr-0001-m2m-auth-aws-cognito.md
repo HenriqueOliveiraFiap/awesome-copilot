@@ -254,7 +254,7 @@ public async Task<IActionResult> CreateAccount() { }
 **Node.js:**
 
 ```js
-const { CognitoJwtVerifier } = require('aws-jwt-verify'); // biblioteca oficial AWS (substitui express-jwt, que é legada)
+const { CognitoJwtVerifier } = require('aws-jwt-verify'); // biblioteca oficial AWS (substitui express-jwt, que está descontinuada)
 
 const verifier = CognitoJwtVerifier.create({
   userPoolId: 'us-east-1_XXX',
