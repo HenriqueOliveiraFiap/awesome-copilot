@@ -436,7 +436,15 @@ As definições nesta ADR propõem uma evolução significativa na arquitetura d
 
 ## **Fase 2 — Evoluções Futuras**
 
-Esta seção consolida todas as evoluções consideradas, mas que **não fazem parte do escopo da Fase 1**. Reavaliar após consolidação e estabilidade da Fase 1 (estimativa: 12 meses após rollout).
+Esta seção consolida todas as evoluções consideradas, mas que **não fazem parte do escopo da Fase 1**.
+
+**Critério de reavaliação:** Reavaliar esta seção quando **todos** os gatilhos abaixo forem atendidos:
+
+- ✅ 100% dos serviços do Core migrados para Cognito M2M (marco de conclusão da Fase 1)
+- ✅ Bibliotecas internas estáveis e adotadas por todos os times (sem exceções no CI/CD)
+- ✅ Ao menos um ciclo completo de rotação de segredos executado com sucesso
+
+**Estimativa de janela para início da Fase 2:** 12 meses após o rollout completo da Fase 1.
 
 ### **Service Mesh com Istio**
 
