@@ -215,19 +215,18 @@ Um dos pilares mais importantes das bibliotecas internas é o **gerenciamento de
 
 Independentemente da abordagem de cache escolhida, as bibliotecas devem seguir o seguinte contrato de ciclo de vida:
 
-```
-Token TTL = 3600s (1 hora — padrão do Cognito)
+```mermaid
+flowchart LR
+    A(["⏱ 0s\nToken emitido\npelo Cognito"])
+    B(["⚠️ 3540s\nInício da janela\nde renovação proativa\n(60s antes do exp)"])
+    C(["⛔ 3600s\nToken expira\n(as libs nunca chegam aqui)"])
 
-┌─────────────────────────────────────────────────────────────┐
-│ 0s          3540s       3600s                               │
-│  │───────────────────────│────│                             │
-│  │  Token válido          │    │                             │
-│  │                        │    └─ Token expirado (nunca      │
-│  │                        │       chega aqui nas libs)      │
-│  │                        └─ Janela de renovação proativa   │
-│  │                           (60s antes do exp)             │
-│  └─ Token emitido pelo Cognito                              │
-└─────────────────────────────────────────────────────────────┘
+    A -->|"← 3540s usando token normalmente →"| B
+    B -->|"← 60s renovando em background →"| C
+
+    style A fill:#2196F3,color:#fff,stroke:#1565C0
+    style B fill:#FF9800,color:#fff,stroke:#E65100
+    style C fill:#F44336,color:#fff,stroke:#B71C1C
 ```
 
 **Regras das bibliotecas:**
@@ -269,21 +268,23 @@ Cada pod mantém seu próprio cache em memória. É a abordagem padrão para a *
 
 **Funcionamento:**
 
-```
-┌─────────────┐          ┌──────────────────────┐          ┌─────────────┐
-│  Pod A      │          │  IMemoryCache (Pod A) │          │             │
-│  (replica 1)│ ────────▶│  token: eyJhbG...    │          │   AWS       │
-│             │◀──────── │  exp: +55min          │          │   Cognito   │
-└─────────────┘          └──────────────────────┘          │             │
-                                                             │             │
-┌─────────────┐          ┌──────────────────────┐          │             │
-│  Pod B      │          │  IMemoryCache (Pod B) │          │             │
-│  (replica 2)│ ────────▶│  token: eyJhbG...    │──────────▶             │
-│             │◀──────── │  exp: +55min          │◀──────── │             │
-└─────────────┘          └──────────────────────┘          └─────────────┘
+```mermaid
+flowchart LR
+    subgraph PodA["Pod A (replica 1)"]
+        CA[("IMemoryCache\ntoken: eyJhbG...\nexp: +55min")]
+    end
+    subgraph PodB["Pod B (replica 2)"]
+        CB[("IMemoryCache\ntoken: eyJhbG...\nexp: +55min")]
+    end
+    Cognito(["☁️ AWS Cognito"])
 
-Resultado: 2 pods × 1 token cada = 2 tokens válidos e independentes circulando
+    PodA <-->|lê / escreve| CA
+    PodB <-->|lê / escreve| CB
+    CA -->|"emite token (cold-start)"| Cognito
+    CB -->|"emite token (cold-start)"| Cognito
 ```
+
+> Resultado: 2 pods × 1 token cada = 2 tokens válidos e independentes circulando
 
 **Por que múltiplos tokens simultâneos são aceitos:**
 
@@ -359,17 +360,17 @@ Todas as réplicas de um mesmo serviço compartilham um único cache externo. É
 
 **Funcionamento:**
 
-```
-┌─────────────┐
-│  Pod A      │──────────┐
-│  (replica 1)│          │          ┌─────────────────────────┐          ┌─────────────┐
-└─────────────┘          ├─────────▶│  Redis / ElastiCache    │          │             │
-                          │          │  key: m2m_token_svc-x   │──────────▶   AWS       │
-┌─────────────┐          │          │  value: eyJhbG...        │◀──────── │   Cognito   │
-│  Pod B      │──────────┘          │  ttl: 3540s              │          │             │
-│  (replica 2)│◀────────────────────│                          │          └─────────────┘
-└─────────────┘                     └─────────────────────────┘
-                                     (apenas 1 token compartilhado)
+```mermaid
+flowchart LR
+    PodA["Pod A\n(replica 1)"]
+    PodB["Pod B\n(replica 2)"]
+    Redis[("Redis / ElastiCache\nkey: m2m_token_svc-x\nvalue: eyJhbG...\nttl: 3540s\n\n★ apenas 1 token compartilhado")]
+    Cognito(["☁️ AWS Cognito"])
+
+    PodA <-->|"lê token"| Redis
+    PodB <-->|"lê token"| Redis
+    Redis -->|"emite token (apenas 1 vez)"| Cognito
+    Cognito -->|"retorna token"| Redis
 ```
 
 **Implementação .NET (com `IDistributedCache`):**
